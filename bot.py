@@ -1,4 +1,4 @@
-# bot.py — inline-бот Apple ↔ Spotify (устойчивый парсинг без BeautifulSoup)
+# bot.py — inline-бот Apple ↔ Spotify
 # Требования: aiogram>=3.4, httpx>=0.24
 
 import os, re, json, asyncio, sys, logging
@@ -6,7 +6,6 @@ import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, Message
 
-# === Конфиг ===
 DEFAULT_STOREFRONT = "us"
 INLINE_TIMEOUT = 8
 
@@ -18,9 +17,8 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-# ---------- helpers ----------
+# ---------- utils ----------
 def strip_inv(s: str) -> str:
-    # убираем невидимые и NBSP
     return re.sub(r"[\u200B-\u200F\u202A-\u202E\u2066-\u2069\u00A0]", " ", s or "")
 
 def clean_title(raw: str) -> str:
@@ -54,6 +52,7 @@ async def get_json(client: httpx.AsyncClient, url: str):
     r.raise_for_status()
     return r.json()
 
+# ---------- Spotify extract (как в твоём файле) ----------
 def parse_spotify_title(title: str):
     s = re.sub(r"\s*\|\s*Spotify\s*$", title or "", flags=re.I)
     s = re.sub(r"^\s*(?:title|titel|название)\s*[:\-–—]\s*", "", s, flags=re.I)
@@ -65,13 +64,7 @@ def parse_spotify_title(title: str):
     if m: return clean_title(m.group(1)), clean_artist(m.group(2))
     return None, None
 
-# ---------- extractors ----------
 async def extract_from_spotify(client: httpx.AsyncClient, url: str):
-    """
-    1) oEmbed (title/author_name)
-    2) HTML + <meta> + __NEXT_DATA__ (как в твоей версии)
-    3) <title> запасной
-    """
     def meta_dict(html: str) -> dict:
         out = {}
         for m in re.finditer(r"<meta\s+[^>]*>", html, flags=re.I):
@@ -108,14 +101,13 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
     except Exception:
         pass
 
-    # 2) HTML endpoints
+    # 2) HTML endpoints (meta + __NEXT_DATA__ + <title>)
     async def try_from_html(html: str):
         metas = meta_dict(html)
         ogt = metas.get("og:title") or metas.get("twitter:title")
         ogd = metas.get("og:description") or metas.get("description")
         logging.info("SPOT meta: og:title=%r og:desc=%r", ogt, ogd)
 
-        # A) og:title «Track — Artist»
         if ogt:
             t, a = parse_spotify_title(ogt)
             if not (t and a):
@@ -124,7 +116,6 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
                 logging.info("SPOT via og:title")
                 return a, t
 
-        # B) артист в описании, трек в заголовке
         if ogt and ogd:
             artist_guess = re.split(r"\s*[·\-\|]\s*", ogd.strip())[0]
             t2, _ = parse_dash(ogt)
@@ -134,7 +125,6 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
                 logging.info("SPOT via og:desc + og:title")
                 return clean_artist(artist_guess), t2
 
-        # C) __NEXT_DATA__
         mnext = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>([\s\S]*?)</script>', html, flags=re.I)
         if mnext:
             try:
@@ -158,7 +148,7 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
                             r = walk(v)
                             if r: return r
                     elif isinstance(x, list):
-                        for it in x:
+                        for it in x: 
                             r = walk(it)
                             if r: return r
                     return None
@@ -169,7 +159,6 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
             except Exception:
                 pass
 
-        # D) <title>
         tt = re.search(r"<title>([^<]+)</title>", html, flags=re.I)
         if tt:
             t, a = parse_spotify_title(tt.group(1))
@@ -196,6 +185,7 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
 
     raise RuntimeError("Не удалось извлечь из Spotify")
 
+# ---------- Apple extract (как в твоём файле) ----------
 async def extract_from_apple(client: httpx.AsyncClient, url: str):
     html = await get_text(client, url)
 
@@ -261,7 +251,6 @@ async def search_apple(client: httpx.AsyncClient, storefront: str, artist: str, 
     return None
 
 async def search_spotify(client: httpx.AsyncClient, artist: str, track: str) -> str | None:
-    # DuckDuckGo → Brave → Bing
     artist_q = norm_for_query(artist)
     track_q  = norm_for_query(track)
 
@@ -305,7 +294,9 @@ async def search_spotify(client: httpx.AsyncClient, artist: str, track: str) -> 
 async def convert_inline(url: str, storefront: str = DEFAULT_STOREFRONT) -> str | None:
     async with httpx.AsyncClient(
         follow_redirects=True,
-        headers={"User-Agent":"Mozilla/5.0", "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language":"en"},
+        headers={"User-Agent":"Mozilla/5.0",
+                 "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                 "Accept-Language":"en"},
         trust_env=True
     ) as client:
         if "open.spotify.com/track/" in url:
