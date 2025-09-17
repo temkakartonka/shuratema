@@ -68,28 +68,34 @@ async def extract_from_spotify(c: httpx.AsyncClient, url:str):
     except: pass
     raise RuntimeError("Не удалось извлечь из Spotify")
 
-async def extract_from_apple(c: httpx.AsyncClient, url:str):
-    html = await get_text(c, url)
-    # JSON-LD
-    for m in re.finditer(r'<script type="application/ld\+json">([\s\S]*?)</script>', html, flags=re.I):
-        try:
-            obj = json.loads(m.group(1))
-            arr = obj if isinstance(obj, list) else [obj]
-            for o in arr:
-                name = o.get("name",""); by = o.get("byArtist",{})
-                artist = by.get("name") if isinstance(by,dict) else by
-                if name and artist: return clean_artist(str(artist)), clean_title(str(name))
-        except: pass
-    # og:title
-    og = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html, flags=re.I)
-    if og and " — " in og.group(1):
-        left,right = og.group(1).split(" — ",1)
-        return clean_artist(right), clean_title(left)
-    # title
-    tt = re.search(r"<title>([^<]+)</title>", html, flags=re.I)
-    if tt and "—" in tt.group(1):
-        left,right = tt.group(1).split("—",1)
-        return clean_artist(right), clean_title(left)
+async def extract_from_apple(client, url: str):
+    resp = await client.get(url)
+    if resp.status_code != 200:
+        raise RuntimeError("Не удалось загрузить страницу Apple")
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # 1. Сначала пробуем og:title
+    title = soup.find("meta", property="og:title")
+    if title and title.get("content"):
+        text = title["content"]
+    else:
+        # 2. Если og:title нет — берем обычный <title>
+        text = soup.title.string if soup.title else None
+
+    if not text:
+        raise RuntimeError("Не удалось извлечь из Apple")
+
+    # Обычно формат: "Bitter Sweet Symphony - Song by The Verve"
+    parts = text.split("–")
+    if len(parts) >= 2:
+        track = parts[0].strip()
+        artist = parts[-1].replace("Apple Music", "").replace("Song by", "").strip()
+    else:
+        track = text.strip()
+        artist = "Unknown"
+
+    return artist, track
     raise RuntimeError("Не удалось извлечь из Apple")
 
 async def search_apple(c:httpx.AsyncClient, storefront:str, artist:str, track:str)->str|None:
