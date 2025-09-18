@@ -1,7 +1,8 @@
-# bot.py — inline-бот Apple ↔ Spotify
-# Требования: aiogram>=3.4, httpx>=0.24
+# bot.py — inline-бот конвертации Apple ↔ Spotify
+# Зависимости: aiogram>=3.4, httpx>=0.24
 
 import os, re, json, asyncio, sys, logging
+from urllib.parse import urlparse, parse_qs
 import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, Message
@@ -52,7 +53,46 @@ async def get_json(client: httpx.AsyncClient, url: str):
     r.raise_for_status()
     return r.json()
 
-# ---------- Spotify extract (как в твоём файле) ----------
+# ---------- Apple helpers (альбомная ссылка ?i=<trackId>) ----------
+def is_apple_track_url(url: str) -> bool:
+    """Ссылка на трек в Apple: /song/ или /album/... с ?i=<trackId>."""
+    if "music.apple.com" not in url:
+        return False
+    if "/song/" in url:
+        return True
+    if "/album/" in url:
+        qs = parse_qs(urlparse(url).query)
+        return "i" in qs and any(x.isdigit() for x in qs.get("i", []))
+    return False
+
+async def normalize_apple_album_i(client: httpx.AsyncClient, url: str, storefront: str) -> str | None:
+    """
+    Преобразует /album/...?...&i=<trackId> в прямую ссылку на песню через iTunes Lookup.
+    """
+    if "/album/" not in url:
+        return None
+    qs = parse_qs(urlparse(url).query)
+    ids = qs.get("i", [])
+    if not ids or not ids[0].isdigit():
+        return None
+    track_id = ids[0]
+    try:
+        data = await get_json(
+            client,
+            f"https://itunes.apple.com/lookup?id={track_id}&country={storefront}&entity=song"
+        )
+        results = data.get("results") or []
+        for item in results:
+            if item.get("kind") == "song" and item.get("trackViewUrl"):
+                return item["trackViewUrl"]
+        for item in results:
+            if item.get("trackViewUrl"):
+                return item["trackViewUrl"]
+    except Exception:
+        pass
+    return None
+
+# ---------- Spotify extract ----------
 def parse_spotify_title(title: str):
     s = re.sub(r"\s*\|\s*Spotify\s*$", title or "", flags=re.I)
     s = re.sub(r"^\s*(?:title|titel|название)\s*[:\-–—]\s*", "", s, flags=re.I)
@@ -148,7 +188,7 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
                             r = walk(v)
                             if r: return r
                     elif isinstance(x, list):
-                        for it in x: 
+                        for it in x:
                             r = walk(it)
                             if r: return r
                     return None
@@ -185,7 +225,7 @@ async def extract_from_spotify(client: httpx.AsyncClient, url: str):
 
     raise RuntimeError("Не удалось извлечь из Spotify")
 
-# ---------- Apple extract (как в твоём файле) ----------
+# ---------- Apple extract ----------
 async def extract_from_apple(client: httpx.AsyncClient, url: str):
     html = await get_text(client, url)
 
@@ -215,7 +255,7 @@ async def extract_from_apple(client: httpx.AsyncClient, url: str):
             left, right = s.split(" — ", 1)
             return clean_artist(right), clean_title(left)
 
-    # <title> запасной
+    # <title>
     tt = re.search(r"<title>([^<]+)</title>", html, flags=re.I)
     if tt:
         s = tt.group(1)
@@ -302,10 +342,16 @@ async def convert_inline(url: str, storefront: str = DEFAULT_STOREFRONT) -> str 
         if "open.spotify.com/track/" in url:
             artist, track = await extract_from_spotify(client, url)
             return await search_apple(client, storefront, artist, track)
+
         if "music.apple.com/" in url:
+            # Нормализуем альбомные ссылки с ?i=<trackId>
+            norm = await normalize_apple_album_i(client, url, storefront)
+            if norm:
+                url = norm
             artist, track = await extract_from_apple(client, url)
             artist, track = clean_artist(artist), clean_title(track)
             return await search_spotify(client, artist, track)
+
     return None
 
 # ---------- bot ----------
@@ -324,20 +370,21 @@ async def on_inline(q: InlineQuery):
         return await q.answer([InlineQueryResultArticle(
             id="help",
             title="Вставьте ссылку на ПЕСНЮ",
-            description="Apple /song/ и Spotify /track/",
+            description="Apple /song/ или /album?...&i=<id>, а также Spotify /track/",
             input_message_content=InputTextMessageContent(
-                message_text="Поддерживаются ссылки на песню: Apple /song/ и Spotify /track/."
+                message_text="Поддерживаются ссылки на песню: Apple /song/ и Apple /album?...&i=<trackId>, а также Spotify /track/."
             ),
         )], cache_time=1, is_personal=True)
 
     url = m.group(1)
-    if ("music.apple.com" in url and "/song/" not in url) or ("open.spotify.com" in url and "/track/" not in url):
+    if ("music.apple.com" in url and not is_apple_track_url(url)) or \
+       ("open.spotify.com" in url and "/track/" not in url):
         return await q.answer([InlineQueryResultArticle(
             id="onlysong",
             title="Нужна ссылка на ПЕСНЮ",
-            description="Альбом/плейлист не поддерживается",
+            description="Альбом/плейлист без ?i= не поддерживается",
             input_message_content=InputTextMessageContent(
-                message_text="Используйте ссылку на ПЕСНЮ (Apple /song/, Spotify /track/)."
+                message_text="Используйте ссылку на ПЕСНЮ: Apple /song/ ИЛИ /album?...&i=<trackId>, либо Spotify /track/."
             ),
         )], cache_time=1, is_personal=True)
 
