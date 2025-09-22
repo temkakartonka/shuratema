@@ -372,7 +372,7 @@ async def on_inline(q: InlineQuery):
             title="Вставьте ссылку на ПЕСНЮ",
             description="Apple /song/ или /album?...&i=<id>, а также Spotify /track/",
             input_message_content=InputTextMessageContent(
-                message_text="Поддерживаются ссылки на песню: Apple /song/ и Apple /album?...&i=<trackId>, а также Spotify /track/."
+                message_text="Поддерживаются ссылки на песню: Apple и Spotify"
             ),
         )], cache_time=1, is_personal=True)
 
